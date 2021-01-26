@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	skipCallers = 5
+	skipCallers = 6
 	stackSize   = 30
 )
 
@@ -24,10 +24,9 @@ func Caller(skipPackages ...string) string {
 
 	for i := 0; i < n; i++ {
 		f := runtime.FuncForPC(pc[i])
-		fn := f.Name()
 
 		// Skip unnamed literals.
-		if strings.Contains(fn, "{") {
+		if strings.Contains(f.Name(), "{") {
 			continue
 		}
 
