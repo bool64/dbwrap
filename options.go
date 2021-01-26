@@ -78,6 +78,27 @@ func WithOperations(op ...Operation) Option {
 	}
 }
 
+// WithAllOperations enables all operations to be wrapped with middleware.
+// This also includes RowsNext.
+func WithAllOperations() Option {
+	return WithOperations(
+		Ping,
+		Exec,
+		Query,
+		Prepare,
+		Begin,
+		LastInsertID,
+		RowsAffected,
+		StmtExec,
+		StmtQuery,
+		StmtClose,
+		RowsClose,
+		RowsNext,
+		Commit,
+		Rollback,
+	)
+}
+
 // prepareOptions returns prepared Options and flag if they are operational.
 func prepareOptions(options []Option) (Options, bool) {
 	o := Options{}
