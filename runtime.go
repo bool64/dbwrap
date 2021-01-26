@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	skipCallers = 6
+	skipCallers = 5
 	stackSize   = 30
 )
 
@@ -24,11 +24,18 @@ func Caller(skipPackages ...string) string {
 
 	for i := 0; i < n; i++ {
 		f := runtime.FuncForPC(pc[i])
+		fn := f.Name()
+
+		// Skip unnamed literals.
+		if strings.Contains(fn, "{") {
+			continue
+		}
+
 		parts := strings.Split(f.Name(), "/")
 		parts[len(parts)-1] = strings.Split(parts[len(parts)-1], ".")[0]
 		p = strings.Join(parts, "/")
 
-		if p == "database/sql" {
+		if p == "database/sql" || p == "github.com/bool64/dbwrap" {
 			continue
 		}
 
