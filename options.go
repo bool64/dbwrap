@@ -1,190 +1,104 @@
-package ocsql
+package dbwrap
 
 import (
-	"go.opencensus.io/trace"
+	"context"
+	"database/sql/driver"
 )
 
-// TraceOption allows for managing ocsql configuration using functional options.
-type TraceOption func(o *TraceOptions)
+// Middleware returns instrumented context and finalizer callback.
+//
+// Middleware is invoked before operation.
+// Returned onFinish function is invoked after the operation.
+type Middleware func(
+	ctx context.Context,
+	operation Operation,
+	statement string,
+	args []driver.NamedValue,
+) (nCtx context.Context, onFinish func(error))
 
-const defaultInstanceName = "default"
+// Option allows for managing wrapper configuration using functional options.
+type Option func(o *Options)
 
-// TraceOptions holds configuration of our ocsql tracing middleware.
+// Options holds configuration of our wrapper.
 // By default all options are set to false intentionally when creating a wrapped
 // driver and provide the most sensible default with both performance and
 // security in mind.
-type TraceOptions struct {
-	// AllowRoot, if set to true, will allow ocsql to create root spans in
-	// absence of existing spans or even context.
-	// Default is to not trace ocsql calls if no existing parent span is found
-	// in context or when using methods not taking context.
-	AllowRoot bool
+type Options struct {
+	// Middlewares wrap operations.
+	Middlewares []Middleware
 
-	// Ping, if set to true, will enable the creation of spans on Ping requests.
-	Ping bool
+	// Intercept mutates statement and/or parameters.
+	Intercept func(
+		ctx context.Context,
+		operation Operation,
+		statement string,
+		args []driver.NamedValue,
+	) (context.Context, string, []driver.NamedValue)
 
-	// RowsNext, if set to true, will enable the creation of spans on RowsNext
-	// calls. This can result in many spans.
-	RowsNext bool
+	// Operations lists which operations should be wrapped.
+	Operations []Operation
 
-	// RowsClose, if set to true, will enable the creation of spans on RowsClose
-	// calls.
-	RowsClose bool
-
-	// RowsAffected, if set to true, will enable the creation of spans on
-	// RowsAffected calls.
-	RowsAffected bool
-
-	// LastInsertID, if set to true, will enable the creation of spans on
-	// LastInsertId calls.
-	LastInsertID bool
-
-	// Query, if set to true, will enable recording of sql queries in spans.
-	// Only allow this if it is safe to have queries recorded with respect to
-	// security.
-	Query bool
-
-	// QueryParams, if set to true, will enable recording of parameters used
-	// with parametrized queries. Only allow this if it is safe to have
-	// parameters recorded with respect to security.
-	// This setting is a noop if the Query option is set to false.
-	QueryParams bool
-
-	// DefaultAttributes will be set to each span as default.
-	DefaultAttributes []trace.Attribute
-
-	// InstanceName identifies database.
-	InstanceName string
-
-	// DisableErrSkip, if set to true, will suppress driver.ErrSkip errors in spans.
-	DisableErrSkip bool
-
-	// Sampler to use when creating spans.
-	Sampler trace.Sampler
+	operations map[Operation]bool
 }
 
-// WithAllTraceOptions enables all available trace options.
-func WithAllTraceOptions() TraceOption {
-	return func(o *TraceOptions) {
-		*o = AllTraceOptions
-	}
-}
-
-// AllTraceOptions has all tracing options enabled.
-var AllTraceOptions = TraceOptions{
-	AllowRoot:    true,
-	Ping:         true,
-	RowsNext:     true,
-	RowsClose:    true,
-	RowsAffected: true,
-	LastInsertID: true,
-	Query:        true,
-	QueryParams:  true,
-}
-
-// WithOptions sets our ocsql tracing middleware options through a single
-// TraceOptions object.
-func WithOptions(options TraceOptions) TraceOption {
-	return func(o *TraceOptions) {
+// WithOptions sets our wrapper options through a single
+// Options object.
+func WithOptions(options Options) Option {
+	return func(o *Options) {
 		*o = options
-		o.DefaultAttributes = append(
-			[]trace.Attribute(nil), options.DefaultAttributes...,
-		)
 	}
 }
 
-// WithAllowRoot if set to true, will allow ocsql to create root spans in
-// absence of exisiting spans or even context.
-// Default is to not trace ocsql calls if no existing parent span is found
-// in context or when using methods not taking context.
-func WithAllowRoot(b bool) TraceOption {
-	return func(o *TraceOptions) {
-		o.AllowRoot = b
+// WithMiddleware adds one or multiple middlewares to a db wrapper.
+func WithMiddleware(mw ...Middleware) Option {
+	return func(o *Options) {
+		o.Middlewares = append(o.Middlewares, mw...)
 	}
 }
 
-// WithPing if set to true, will enable the creation of spans on Ping requests.
-func WithPing(b bool) TraceOption {
-	return func(o *TraceOptions) {
-		o.Ping = b
+// WithInterceptor sets statement interceptor to a db wrapper.
+// Interceptor receives every statement that is to be requested
+// and can change it.
+func WithInterceptor(i func(
+	ctx context.Context,
+	operation Operation,
+	statement string,
+	args []driver.NamedValue,
+) (context.Context, string, []driver.NamedValue)) Option {
+	return func(o *Options) {
+		o.Intercept = i
 	}
 }
 
-// WithRowsNext if set to true, will enable the creation of spans on RowsNext
-// calls. This can result in many spans.
-func WithRowsNext(b bool) TraceOption {
-	return func(o *TraceOptions) {
-		o.RowsNext = b
+// WithOperations controls which operations should be wrapped with middlewares.
+// It does not affect statement interceptor.
+func WithOperations(op ...Operation) Option {
+	return func(o *Options) {
+		o.Operations = append(o.Operations, op...)
 	}
 }
 
-// WithRowsClose if set to true, will enable the creation of spans on RowsClose
-// calls.
-func WithRowsClose(b bool) TraceOption {
-	return func(o *TraceOptions) {
-		o.RowsClose = b
-	}
-}
+// prepareOptions returns prepared Options and flag if they are operational.
+func prepareOptions(options []Option) (Options, bool) {
+	o := Options{}
 
-// WithRowsAffected if set to true, will enable the creation of spans on
-// RowsAffected calls.
-func WithRowsAffected(b bool) TraceOption {
-	return func(o *TraceOptions) {
-		o.RowsAffected = b
+	for _, option := range options {
+		option(&o)
 	}
-}
 
-// WithLastInsertID if set to true, will enable the creation of spans on
-// LastInsertId calls.
-func WithLastInsertID(b bool) TraceOption {
-	return func(o *TraceOptions) {
-		o.LastInsertID = b
+	if len(o.Middlewares) == 0 && o.Intercept == nil {
+		return o, false
 	}
-}
 
-// WithQuery if set to true, will enable recording of sql queries in spans.
-// Only allow this if it is safe to have queries recorded with respect to
-// security.
-func WithQuery(b bool) TraceOption {
-	return func(o *TraceOptions) {
-		o.Query = b
-	}
-}
+	o.operations = defaultOperations
 
-// WithQueryParams if set to true, will enable recording of parameters used
-// with parametrized queries. Only allow this if it is safe to have
-// parameters recorded with respect to security.
-// This setting is a noop if the Query option is set to false.
-func WithQueryParams(b bool) TraceOption {
-	return func(o *TraceOptions) {
-		o.QueryParams = b
-	}
-}
+	if len(o.Operations) > 0 {
+		o.operations = make(map[Operation]bool, len(o.Operations))
 
-// WithDefaultAttributes will be set to each span as default.
-func WithDefaultAttributes(attrs ...trace.Attribute) TraceOption {
-	return func(o *TraceOptions) {
-		o.DefaultAttributes = attrs
+		for _, op := range o.Operations {
+			o.operations[op] = true
+		}
 	}
-}
 
-// WithDisableErrSkip, if set to true, will suppress driver.ErrSkip errors in spans.
-func WithDisableErrSkip(b bool) TraceOption {
-	return func(o *TraceOptions) {
-		o.DisableErrSkip = b
-	}
-}
-
-// WithSampler will be used on span creation.
-func WithSampler(sampler trace.Sampler) TraceOption {
-	return func(o *TraceOptions) {
-		o.Sampler = sampler
-	}
-}
-
-// WithInstanceName sets database instance name.
-func WithInstanceName(instanceName string) TraceOption {
-	return func(o *TraceOptions) {
-		o.InstanceName = instanceName
-	}
+	return o, true
 }

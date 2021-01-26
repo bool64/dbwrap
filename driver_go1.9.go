@@ -1,29 +1,28 @@
 // +build go1.9,!go1.10
 
-package ocsql
+package dbwrap
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 )
 
 var errConnDone = sql.ErrConnDone
 
-// ocDriver implements driver.Driver
-type ocDriver struct {
+// wDriver implements driver.Driver
+type wDriver struct {
 	parent  driver.Driver
-	options TraceOptions
+	options Options
 }
 
-func wrapDriver(d driver.Driver, o TraceOptions) driver.Driver {
-	return ocDriver{parent: d, options: o}
+func wrapDriver(d driver.Driver, o Options) driver.Driver {
+	return wDriver{parent: d, options: o}
 }
 
-func wrapConn(parent driver.Conn, options TraceOptions) driver.Conn {
-	var (
-		n, hasNameValueChecker = parent.(driver.NamedValueChecker)
-	)
-	c := &ocConn{parent: parent, options: options}
+func wrapConn(parent driver.Conn, options Options) driver.Conn {
+	n, hasNameValueChecker := parent.(driver.NamedValueChecker)
+	c := &wConn{parent: parent, options: options}
 	if hasNameValueChecker {
 		return struct {
 			conn
@@ -33,7 +32,7 @@ func wrapConn(parent driver.Conn, options TraceOptions) driver.Conn {
 	return c
 }
 
-func wrapStmt(stmt driver.Stmt, query string, options TraceOptions) driver.Stmt {
+func wrapStmt(ctx context.Context, stmt driver.Stmt, query string, options Options) driver.Stmt {
 	var (
 		_, hasExeCtx    = stmt.(driver.StmtExecContext)
 		_, hasQryCtx    = stmt.(driver.StmtQueryContext)
@@ -41,7 +40,7 @@ func wrapStmt(stmt driver.Stmt, query string, options TraceOptions) driver.Stmt 
 		n, hasNamValChk = stmt.(driver.NamedValueChecker)
 	)
 
-	s := ocStmt{parent: stmt, query: query, options: options}
+	s := wStmt{ctx: ctx, parent: stmt, query: query, options: options}
 	switch {
 	case !hasExeCtx && !hasQryCtx && !hasColConv && !hasNamValChk:
 		return struct {

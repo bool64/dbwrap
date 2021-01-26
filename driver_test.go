@@ -1,4 +1,4 @@
-package ocsql
+package dbwrap
 
 import (
 	"context"
@@ -28,9 +28,17 @@ func (stubRows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok 
 
 func TestWrappingTransparency(t *testing.T) {
 	var (
-		ctx   = context.Background()
-		oRows = &stubRows{}
-		wRows = wrapRows(ctx, oRows, AllTraceOptions)
+		ctx        = context.Background()
+		oRows      = &stubRows{}
+		options, _ = prepareOptions([]Option{
+			WithInterceptor(func(ctx context.Context, operation Operation, statement string, args []driver.NamedValue) (context.Context, string, []driver.NamedValue) {
+				return ctx, statement, args
+			}),
+			WithMiddleware(func(ctx context.Context, operation Operation, statement string, args []driver.NamedValue) (nCtx context.Context, onFinish func(error)) {
+				return ctx, nil
+			}),
+		})
+		wRows = wrapRows(ctx, oRows, options)
 	)
 
 	if want, have := oRows.Columns(), wRows.Columns(); len(want) != len(have) {
@@ -57,34 +65,49 @@ func TestWrappingTransparency(t *testing.T) {
 		t.Errorf("rows.ColumnTypeScanType want: %v, have: %v", want, have)
 	}
 
-	if want, have := oRows.ColumnTypeDatabaseTypeName(1), wRows.(driver.RowsColumnTypeDatabaseTypeName).ColumnTypeDatabaseTypeName(1); want != have {
+	if want, have := oRows.ColumnTypeDatabaseTypeName(1),
+		wRows.(driver.RowsColumnTypeDatabaseTypeName).ColumnTypeDatabaseTypeName(1); want != have {
 		t.Errorf("rows.ColumnTypeDatabaseTypeName want: %s, have: %s", want, have)
 	}
 
 	oLength, oOk := oRows.ColumnTypeLength(1)
 	wLength, wOk := wRows.(driver.RowsColumnTypeLength).ColumnTypeLength(1)
+
 	if oLength != wLength || oOk != wOk {
 		t.Errorf("rows.ColumnTypeLength want: %d:%t, have %d:%t", oLength, oOk, wLength, wOk)
 	}
 
 	oNullable, oOk := oRows.ColumnTypeNullable(1)
 	wNullable, wOk := wRows.(driver.RowsColumnTypeNullable).ColumnTypeNullable(1)
+
 	if oNullable != wNullable || oOk != wOk {
 		t.Errorf("rows.ColumnTypeNullable want: %t:%t, have %t:%t", oNullable, oOk, wNullable, wOk)
 	}
 
 	oPrecision, oScale, oOk := oRows.ColumnTypePrecisionScale(1)
 	wPrecision, wScale, wOk := wRows.(driver.RowsColumnTypePrecisionScale).ColumnTypePrecisionScale(1)
+
 	if oPrecision != wPrecision || oScale != wScale || oOk != wOk {
-		t.Errorf("rows.ColumnTypePrecisionScale want: %d:%d:%t, have %d:%d:%t", oPrecision, oScale, oOk, wPrecision, wScale, wOk)
+		t.Errorf("rows.ColumnTypePrecisionScale want: %d:%d:%t, have %d:%d:%t",
+			oPrecision, oScale, oOk, wPrecision, wScale, wOk)
 	}
 }
 
 func TestWrappingFallback(t *testing.T) {
 	var (
-		ctx   = context.Background()
-		oRows = struct{ driver.Rows }{&stubRows{}}
-		wRows = wrapRows(ctx, oRows, AllTraceOptions)
+		ctx        = context.Background()
+		oRows      = struct{ driver.Rows }{&stubRows{}}
+		options, _ = prepareOptions([]Option{
+			WithInterceptor(func(ctx context.Context, operation Operation, statement string,
+				args []driver.NamedValue) (context.Context, string, []driver.NamedValue) {
+				return ctx, statement, args
+			}),
+			WithMiddleware(func(ctx context.Context, operation Operation, statement string,
+				args []driver.NamedValue) (nCtx context.Context, onFinish func(error)) {
+				return ctx, nil
+			}),
+		})
+		wRows = wrapRows(ctx, oRows, options)
 	)
 
 	if want, have := oRows.Columns(), wRows.Columns(); len(want) != len(have) {
@@ -117,19 +140,23 @@ func TestWrappingFallback(t *testing.T) {
 
 	oLength, oOk := int64(0), false
 	wLength, wOk := wRows.(driver.RowsColumnTypeLength).ColumnTypeLength(1)
+
 	if oLength != wLength || oOk != wOk {
 		t.Errorf("rows.ColumnTypeLength want: %d:%t, have %d:%t", oLength, oOk, wLength, wOk)
 	}
 
 	oNullable, oOk := false, false
 	wNullable, wOk := wRows.(driver.RowsColumnTypeNullable).ColumnTypeNullable(1)
+
 	if oNullable != wNullable || oOk != wOk {
 		t.Errorf("rows.ColumnTypeNullable want: %t:%t, have %t:%t", oNullable, oOk, wNullable, wOk)
 	}
 
 	oPrecision, oScale, oOk := int64(0), int64(0), false
 	wPrecision, wScale, wOk := wRows.(driver.RowsColumnTypePrecisionScale).ColumnTypePrecisionScale(1)
+
 	if oPrecision != wPrecision || oScale != wScale || oOk != wOk {
-		t.Errorf("rows.ColumnTypePrecisionScale want: %d:%d:%t, have %d:%d:%t", oPrecision, oScale, oOk, wPrecision, wScale, wOk)
+		t.Errorf("rows.ColumnTypePrecisionScale want: %d:%d:%t, have %d:%d:%t",
+			oPrecision, oScale, oOk, wPrecision, wScale, wOk)
 	}
 }

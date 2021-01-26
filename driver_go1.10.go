@@ -1,63 +1,55 @@
 // +build go1.10
 
-package ocsql
+package dbwrap
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
-
-	"go.opencensus.io/trace"
 )
 
-var errConnDone = sql.ErrConnDone
-
-// Compile time assertion
+// Compile time assertion.
 var (
-	_ driver.DriverContext = &ocDriver{}
-	_ driver.Connector     = &ocDriver{}
+	_ driver.DriverContext = &wDriver{}
+	_ driver.Connector     = &wDriver{}
 )
 
 // WrapConnector allows wrapping a database driver.Connector which eliminates
-// the need to register ocsql as an available driver.Driver.
-func WrapConnector(dc driver.Connector, options ...TraceOption) driver.Connector {
-	o := TraceOptions{}
-	for _, option := range options {
-		option(&o)
-	}
-	if o.InstanceName == "" {
-		o.InstanceName = defaultInstanceName
-	} else {
-		o.DefaultAttributes = append(o.DefaultAttributes, trace.StringAttribute("sql.instance", o.InstanceName))
+// the need to register wrap as an available driver.Driver.
+func WrapConnector(dc driver.Connector, options ...Option) driver.Connector {
+	if o, ok := prepareOptions(options); ok {
+		return &wDriver{
+			parent:    dc.Driver(),
+			connector: dc,
+			options:   o,
+		}
 	}
 
-	return &ocDriver{
-		parent:    dc.Driver(),
-		connector: dc,
-		options:   o,
-	}
+	return dc
 }
 
-// ocDriver implements driver.Driver
-type ocDriver struct {
+// wDriver implements driver.Driver.
+type wDriver struct {
 	parent    driver.Driver
 	connector driver.Connector
-	options   TraceOptions
+	options   Options
 }
 
-func wrapDriver(d driver.Driver, o TraceOptions) driver.Driver {
+func wrapDriver(d driver.Driver, o Options) driver.Driver {
 	if _, ok := d.(driver.DriverContext); ok {
-		return ocDriver{parent: d, options: o}
+		return wDriver{parent: d, options: o}
 	}
-	return struct{ driver.Driver }{ocDriver{parent: d, options: o}}
+
+	return struct{ driver.Driver }{wDriver{parent: d, options: o}}
 }
 
-func wrapConn(parent driver.Conn, options TraceOptions) driver.Conn {
+func wrapConn(parent driver.Conn, options Options) driver.Conn {
 	var (
 		n, hasNameValueChecker = parent.(driver.NamedValueChecker)
 		s, hasSessionResetter  = parent.(driver.SessionResetter)
 	)
-	c := &ocConn{parent: parent, options: options}
+
+	c := &wConn{parent: parent, options: options}
+
 	switch {
 	case !hasNameValueChecker && !hasSessionResetter:
 		return c
@@ -78,18 +70,21 @@ func wrapConn(parent driver.Conn, options TraceOptions) driver.Conn {
 			driver.SessionResetter
 		}{c, n, s}
 	}
+
 	panic("unreachable")
 }
 
-func wrapStmt(stmt driver.Stmt, query string, options TraceOptions) driver.Stmt {
+// nolint:funlen,gocyclo // Large switch is necessary to combine a variety of traits.
+func wrapStmt(ctx context.Context, stmt driver.Stmt, query string, options Options) driver.Stmt {
 	var (
 		_, hasExeCtx    = stmt.(driver.StmtExecContext)
 		_, hasQryCtx    = stmt.(driver.StmtQueryContext)
-		c, hasColConv   = stmt.(driver.ColumnConverter)
+		c, hasColConv   = stmt.(driver.ColumnConverter) // nolint:staticcheck // Deprecated usage for backwards compatibility.
 		n, hasNamValChk = stmt.(driver.NamedValueChecker)
 	)
 
-	s := ocStmt{parent: stmt, query: query, options: options}
+	s := wStmt{ctx: ctx, parent: stmt, query: query, options: options}
+
 	switch {
 	case !hasExeCtx && !hasQryCtx && !hasColConv && !hasNamValChk:
 		return struct {
@@ -189,26 +184,30 @@ func wrapStmt(stmt driver.Stmt, query string, options TraceOptions) driver.Stmt 
 			driver.NamedValueChecker
 		}{s, s, s, c, n}
 	}
+
 	panic("unreachable")
 }
 
-func (d ocDriver) OpenConnector(name string) (driver.Connector, error) {
+func (d wDriver) OpenConnector(name string) (driver.Connector, error) {
 	var err error
+
 	d.connector, err = d.parent.(driver.DriverContext).OpenConnector(name)
 	if err != nil {
 		return nil, err
 	}
+
 	return d, err
 }
 
-func (d ocDriver) Connect(ctx context.Context) (driver.Conn, error) {
+func (d wDriver) Connect(ctx context.Context) (driver.Conn, error) {
 	c, err := d.connector.Connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &ocConn{parent: c, options: d.options}, nil
+
+	return &wConn{parent: c, options: d.options}, nil
 }
 
-func (d ocDriver) Driver() driver.Driver {
+func (d wDriver) Driver() driver.Driver {
 	return d
 }

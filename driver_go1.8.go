@@ -1,8 +1,9 @@
 // +build !go1.9
 
-package ocsql
+package dbwrap
 
 import (
+	"context"
 	"database/sql/driver"
 	"errors"
 )
@@ -10,22 +11,22 @@ import (
 // Dummy error for setSpanStatus (does exist as sql.ErrConnDone in 1.9+)
 var errConnDone = errors.New("database/sql: connection is already closed")
 
-// ocDriver implements driver.Driver
-type ocDriver struct {
+// wDriver implements driver.Driver
+type wDriver struct {
 	parent  driver.Driver
-	options TraceOptions
+	options Options
 }
 
-func wrapDriver(d driver.Driver, o TraceOptions) driver.Driver {
-	return ocDriver{parent: d, options: o}
+func wrapDriver(d driver.Driver, o Options) driver.Driver {
+	return wDriver{parent: d, options: o}
 }
 
-func wrapConn(c driver.Conn, options TraceOptions) driver.Conn {
-	return &ocConn{parent: c, options: options}
+func wrapConn(c driver.Conn, options Options) driver.Conn {
+	return &wConn{parent: c, options: options}
 }
 
-func wrapStmt(stmt driver.Stmt, query string, options TraceOptions) driver.Stmt {
-	s := ocStmt{parent: stmt, query: query, options: options}
+func wrapStmt(ctx context.Context, stmt driver.Stmt, query string, options Options) driver.Stmt {
+	s := wStmt{ctx: ctx, parent: stmt, query: query, options: options}
 	_, hasExeCtx := stmt.(driver.StmtExecContext)
 	_, hasQryCtx := stmt.(driver.StmtQueryContext)
 	c, hasColCnv := stmt.(driver.ColumnConverter)

@@ -1,24 +1,57 @@
-package ocsql
+package dbwrap
 
 import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"fmt"
 	"io"
 	"reflect"
 	"strconv"
 	"sync"
-
-	"go.opencensus.io/trace"
 )
+
+// Operation enumerates SQL operations.
+type Operation string
+
+// These constants enumerate available SQL operations.
+const (
+	Ping         = Operation("ping")
+	Exec         = Operation("exec")
+	Query        = Operation("query")
+	Prepare      = Operation("prepare")
+	Begin        = Operation("begin")
+	LastInsertID = Operation("last_insert_id")
+	RowsAffected = Operation("rows_affected")
+	StmtExec     = Operation("stmt_exec")
+	StmtQuery    = Operation("stmt_query")
+	StmtClose    = Operation("stmt_close")
+	RowsClose    = Operation("rows_close")
+	RowsNext     = Operation("rows_next")
+	Commit       = Operation("commit")
+	Rollback     = Operation("rollback")
+)
+
+var defaultOperations = map[Operation]bool{
+	Exec:         true,
+	Query:        true,
+	Prepare:      true,
+	Begin:        true,
+	LastInsertID: true,
+	RowsAffected: true,
+	StmtExec:     true,
+	StmtQuery:    true,
+	StmtClose:    true,
+	RowsClose:    true,
+	Commit:       true,
+	Rollback:     true,
+}
 
 type conn interface {
 	driver.Pinger
-	driver.Execer
+	driver.Execer // nolint:staticcheck // Deprecated usage for backwards compatibility.
 	driver.ExecerContext
-	driver.Queryer
+	driver.Queryer // nolint:staticcheck // Deprecated usage for backwards compatibility.
 	driver.QueryerContext
 	driver.Conn
 	driver.ConnPrepareContext
@@ -26,48 +59,48 @@ type conn interface {
 }
 
 var (
-	regMu              sync.Mutex
-	attrMissingContext = trace.StringAttribute("ocsql.warning", "missing upstream context")
-	attrDeprecated     = trace.StringAttribute("ocsql.warning", "database driver uses deprecated features")
+	regMu sync.Mutex
 
-	// Compile time assertions
-	_ driver.Driver                         = &ocDriver{}
-	_ conn                                  = &ocConn{}
-	_ driver.NamedValueChecker              = &ocConn{}
-	_ driver.Result                         = &ocResult{}
-	_ driver.Stmt                           = &ocStmt{}
-	_ driver.StmtExecContext                = &ocStmt{}
-	_ driver.StmtQueryContext               = &ocStmt{}
-	_ driver.Rows                           = &ocRows{}
-	_ driver.RowsNextResultSet              = &ocRows{}
-	_ driver.RowsColumnTypeDatabaseTypeName = &ocRows{}
-	_ driver.RowsColumnTypeLength           = &ocRows{}
-	_ driver.RowsColumnTypeNullable         = &ocRows{}
-	_ driver.RowsColumnTypePrecisionScale   = &ocRows{}
+	// Compile time assertions.
+	_ driver.Driver                         = &wDriver{}
+	_ conn                                  = &wConn{}
+	_ driver.NamedValueChecker              = &wConn{}
+	_ driver.Result                         = &wResult{}
+	_ driver.Stmt                           = &wStmt{}
+	_ driver.StmtExecContext                = &wStmt{}
+	_ driver.StmtQueryContext               = &wStmt{}
+	_ driver.Rows                           = &wRows{}
+	_ driver.RowsNextResultSet              = &wRows{}
+	_ driver.RowsColumnTypeDatabaseTypeName = &wRows{}
+	_ driver.RowsColumnTypeLength           = &wRows{}
+	_ driver.RowsColumnTypeNullable         = &wRows{}
+	_ driver.RowsColumnTypePrecisionScale   = &wRows{}
 )
 
-// Register initializes and registers our ocsql wrapped database driver
-// identified by its driverName and using provided TraceOptions. On success it
+// Register initializes and registers our wrapped database driver
+// identified by its driverName and using provided Options. On success it
 // returns the generated driverName to use when calling sql.Open.
 // It is possible to register multiple wrappers for the same database driver if
-// needing different TraceOptions for different connections.
-func Register(driverName string, options ...TraceOption) (string, error) {
+// needing different Options for different connections.
+func Register(driverName string, options ...Option) (string, error) {
 	return RegisterWithSource(driverName, "", options...)
 }
 
-// RegisterWithSource initializes and registers our ocsql wrapped database driver
-// identified by its driverName, using provided TraceOptions.
+// RegisterWithSource initializes and registers our wrapped database driver
+// identified by its driverName, using provided Options.
 // source is useful if some drivers do not accept the empty string when opening the DB.
 // On success it returns the generated driverName to use when calling sql.Open.
 // It is possible to register multiple wrappers for the same database driver if
-// needing different TraceOptions for different connections.
-func RegisterWithSource(driverName string, source string, options ...TraceOption) (string, error) {
+// needing different Options for different connections.
+func RegisterWithSource(driverName string, source string, options ...Option) (string, error) {
 	// retrieve the driver implementation we need to wrap with instrumentation
 	db, err := sql.Open(driverName, source)
 	if err != nil {
 		return "", err
 	}
+
 	dri := db.Driver()
+
 	if err = db.Close(); err != nil {
 		return "", err
 	}
@@ -75,334 +108,281 @@ func RegisterWithSource(driverName string, source string, options ...TraceOption
 	regMu.Lock()
 	defer regMu.Unlock()
 
-	// Since we might want to register multiple ocsql drivers to have different
-	// TraceOptions, but potentially the same underlying database driver, we
+	// Since we might want to register multiple drivers to have different
+	// Options, but potentially the same underlying database driver, we
 	// cycle through to find available driver names.
-	driverName = driverName + "-ocsql-"
+	driverName += "-wrap-"
+
 	for i := int64(0); i < 100; i++ {
 		var (
 			found   = false
 			regName = driverName + strconv.FormatInt(i, 10)
 		)
+
 		for _, name := range sql.Drivers() {
 			if name == regName {
 				found = true
 			}
 		}
+
 		if !found {
 			sql.Register(regName, Wrap(dri, options...))
+
 			return regName, nil
 		}
 	}
+
 	return "", errors.New("unable to register driver, all slots have been taken")
 }
 
-// Wrap takes a SQL driver and wraps it with OpenCensus instrumentation.
-func Wrap(d driver.Driver, options ...TraceOption) driver.Driver {
-	o := TraceOptions{}
-	for _, option := range options {
-		option(&o)
+// Wrap takes a SQL driver and wraps it with middlewares.
+func Wrap(d driver.Driver, options ...Option) driver.Driver {
+	if o, ok := prepareOptions(options); ok {
+		return wrapDriver(d, o)
 	}
-	if o.InstanceName == "" {
-		o.InstanceName = defaultInstanceName
-	} else {
-		o.DefaultAttributes = append(o.DefaultAttributes, trace.StringAttribute("sql.instance", o.InstanceName))
-	}
-	if o.QueryParams && !o.Query {
-		o.QueryParams = false
-	}
-	return wrapDriver(d, o)
+
+	return d
 }
 
-// Open implements driver.Driver
-func (d ocDriver) Open(name string) (driver.Conn, error) {
+// Open implements driver.Driver.
+func (d wDriver) Open(name string) (driver.Conn, error) {
 	c, err := d.parent.Open(name)
 	if err != nil {
 		return nil, err
 	}
+
 	return wrapConn(c, d.options), nil
 }
 
-// WrapConn allows an existing driver.Conn to be wrapped by ocsql.
-func WrapConn(c driver.Conn, options ...TraceOption) driver.Conn {
-	o := TraceOptions{}
-	for _, option := range options {
-		option(&o)
+// WrapConn allows an existing driver.Conn to be wrapped.
+func WrapConn(c driver.Conn, options ...Option) driver.Conn {
+	if o, ok := prepareOptions(options); ok {
+		return wrapConn(c, o)
 	}
-	if o.InstanceName == "" {
-		o.InstanceName = defaultInstanceName
-	} else {
-		o.DefaultAttributes = append(o.DefaultAttributes, trace.StringAttribute("sql.instance", o.InstanceName))
-	}
-	return wrapConn(c, o)
+
+	return c
 }
 
-// ocConn implements driver.Conn
-type ocConn struct {
+// wConn implements driver.Conn.
+type wConn struct {
 	parent  driver.Conn
-	options TraceOptions
+	options Options
 }
 
-func (c ocConn) Ping(ctx context.Context) (err error) {
-	onDeferWithErr := recordCallStats(ctx, "go.sql.ping", c.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func apply(
+	ctx context.Context,
+	mws []Middleware,
+	operation Operation,
+	statement string,
+	args []driver.NamedValue,
+) (context.Context, []func(error)) {
+	finalizers := make([]func(error), len(mws))
+	n := len(mws)
 
-	if c.options.Ping && (c.options.AllowRoot || trace.FromContext(ctx) != nil) {
-		var span *trace.Span
-		ctx, span = trace.StartSpan(ctx, "sql:ping",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
-		)
-		if len(c.options.DefaultAttributes) > 0 {
-			span.AddAttributes(c.options.DefaultAttributes...)
+	for i, mw := range mws {
+		newCtx, onFinish := mw(ctx, operation, statement, args)
+		ctx = newCtx
+
+		if onFinish == nil {
+			onFinish = func(err error) {}
 		}
+
+		finalizers[n-i-1] = onFinish
+	}
+
+	return ctx, finalizers
+}
+
+func namedValues(args []driver.Value) []driver.NamedValue {
+	var nargs []driver.NamedValue
+	if len(args) > 0 {
+		nargs = make([]driver.NamedValue, 0, len(args))
+
+		for _, a := range args {
+			nargs = append(nargs, driver.NamedValue{Value: a})
+		}
+	}
+
+	return nargs
+}
+
+func values(nargs []driver.NamedValue) []driver.Value {
+	var args []driver.Value
+	if len(nargs) > 0 {
+		args = make([]driver.Value, 0, len(nargs))
+
+		for _, a := range nargs {
+			args = append(args, a.Value)
+		}
+	}
+
+	return args
+}
+
+func (c wConn) Ping(ctx context.Context) (err error) {
+	if c.options.operations[Ping] {
+		newCtx, finalizers := apply(ctx, c.options.Middlewares, Ping, "", nil)
+		ctx = newCtx
+
 		defer func() {
-			if err != nil {
-				span.SetStatus(trace.Status{
-					Code:    trace.StatusCodeUnavailable,
-					Message: err.Error(),
-				})
-			} else {
-				span.SetStatus(trace.Status{Code: trace.StatusCodeOK})
+			for _, onFinish := range finalizers {
+				onFinish(err)
 			}
-			span.End()
 		}()
 	}
 
 	if pinger, ok := c.parent.(driver.Pinger); ok {
-		err = pinger.Ping(ctx)
+		return pinger.Ping(ctx)
 	}
-	return
+
+	return errors.New("driver does not implement Ping")
 }
 
-func (c ocConn) Exec(query string, args []driver.Value) (res driver.Result, err error) {
-	onDeferWithErr := recordCallStats(context.Background(), "go.sql.exec", c.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func (c wConn) Exec(query string, args []driver.Value) (res driver.Result, err error) {
+	ctx := context.Background()
 
-	if exec, ok := c.parent.(driver.Execer); ok {
-		if !c.options.AllowRoot {
-			return exec.Exec(query, args)
-		}
+	// nolint:staticcheck // Deprecated usage for backwards compatibility.
+	exec, ok := c.parent.(driver.Execer)
 
-		ctx, span := trace.StartSpan(context.Background(), "sql:exec",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
-		)
-		attrs := make([]trace.Attribute, 0, len(c.options.DefaultAttributes)+2)
-		attrs = append(attrs, c.options.DefaultAttributes...)
-		attrs = append(
-			attrs,
-			attrDeprecated,
-			trace.StringAttribute(
-				"ocsql.deprecated", "driver does not support ExecerContext",
-			),
-		)
-		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
-			if c.options.QueryParams {
-				attrs = append(attrs, paramsAttr(args)...)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+
+	if c.options.Intercept != nil {
+		nctx, nquery, nargs := c.options.Intercept(ctx, Exec, query, namedValues(args))
+		ctx = nctx
+		args = values(nargs)
+		query = nquery
+	}
+
+	if c.options.operations[Exec] {
+		newCtx, finalizers := apply(ctx, c.options.Middlewares, Exec, query, namedValues(args))
+		ctx = newCtx
+
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
 			}
-		}
-		span.AddAttributes(attrs...)
-
-		defer func() {
-			setSpanStatus(span, c.options, err)
-			span.End()
 		}()
-
-		if res, err = exec.Exec(query, args); err != nil {
-			return nil, err
-		}
-
-		return ocResult{parent: res, ctx: ctx, options: c.options}, nil
 	}
 
-	return nil, driver.ErrSkip
+	if res, err = exec.Exec(query, args); err != nil {
+		return nil, err
+	}
+
+	return wResult{parent: res, ctx: ctx, options: c.options}, nil
 }
 
-func (c ocConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (res driver.Result, err error) {
-	onDeferWithErr := recordCallStats(ctx, "go.sql.exec", c.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func (c wConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (res driver.Result, err error) {
+	execCtx, ok := c.parent.(driver.ExecerContext)
 
-	if execCtx, ok := c.parent.(driver.ExecerContext); ok {
-		parentSpan := trace.FromContext(ctx)
-		if !c.options.AllowRoot && parentSpan == nil {
-			return execCtx.ExecContext(ctx, query, args)
-		}
+	if !ok {
+		return nil, driver.ErrSkip
+	}
 
-		var span *trace.Span
-		if parentSpan == nil {
-			ctx, span = trace.StartSpan(ctx, "sql:exec",
-				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithSampler(c.options.Sampler),
-			)
-		} else {
-			_, span = trace.StartSpan(ctx, "sql:exec",
-				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithSampler(c.options.Sampler),
-			)
-		}
-		attrs := append([]trace.Attribute(nil), c.options.DefaultAttributes...)
-		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
-			if c.options.QueryParams {
-				attrs = append(attrs, namedParamsAttr(args)...)
+	if c.options.Intercept != nil {
+		ctx, query, args = c.options.Intercept(ctx, Exec, query, args)
+	}
+
+	if c.options.operations[Exec] {
+		newCtx, finalizers := apply(ctx, c.options.Middlewares, Exec, query, args)
+		ctx = newCtx
+
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
 			}
-		}
-		span.AddAttributes(attrs...)
-
-		defer func() {
-			setSpanStatus(span, c.options, err)
-			span.End()
 		}()
-
-		if res, err = execCtx.ExecContext(ctx, query, args); err != nil {
-			return nil, err
-		}
-
-		return ocResult{parent: res, ctx: ctx, options: c.options}, nil
 	}
 
-	return nil, driver.ErrSkip
+	if res, err = execCtx.ExecContext(ctx, query, args); err != nil {
+		return nil, err
+	}
+
+	return wResult{parent: res, ctx: ctx, options: c.options}, nil
 }
 
-func (c ocConn) Query(query string, args []driver.Value) (rows driver.Rows, err error) {
-	onDeferWithErr := recordCallStats(context.Background(), "go.sql.query", c.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func (c wConn) Query(query string, args []driver.Value) (rows driver.Rows, err error) {
+	// nolint:staticcheck // Deprecated usage for backwards compatibility.
+	queryer, ok := c.parent.(driver.Queryer)
 
-	if queryer, ok := c.parent.(driver.Queryer); ok {
-		if !c.options.AllowRoot {
-			return queryer.Query(query, args)
-		}
+	if !ok {
+		return nil, driver.ErrSkip
+	}
 
-		ctx, span := trace.StartSpan(context.Background(), "sql:query",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
-		)
-		attrs := make([]trace.Attribute, 0, len(c.options.DefaultAttributes)+2)
-		attrs = append(attrs, c.options.DefaultAttributes...)
-		attrs = append(
-			attrs,
-			attrDeprecated,
-			trace.StringAttribute(
-				"ocsql.deprecated", "driver does not support QueryerContext",
-			),
-		)
-		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
-			if c.options.QueryParams {
-				attrs = append(attrs, paramsAttr(args)...)
+	ctx := context.Background()
+
+	if c.options.Intercept != nil {
+		nctx, nquery, nargs := c.options.Intercept(ctx, Query, query, namedValues(args))
+		ctx = nctx
+		query = nquery
+		args = values(nargs)
+	}
+
+	if c.options.operations[Query] {
+		newCtx, finalizers := apply(ctx, c.options.Middlewares, Query, query, namedValues(args))
+		ctx = newCtx
+
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
 			}
-		}
-		span.AddAttributes(attrs...)
-
-		defer func() {
-			setSpanStatus(span, c.options, err)
-			span.End()
 		}()
-
-		rows, err = queryer.Query(query, args)
-		if err != nil {
-			return nil, err
-		}
-
-		return wrapRows(ctx, rows, c.options), nil
 	}
 
-	return nil, driver.ErrSkip
+	rows, err = queryer.Query(query, args)
+	if err != nil {
+		return nil, err
+	}
+
+	return wrapRows(ctx, rows, c.options), nil
 }
 
-func (c ocConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (rows driver.Rows, err error) {
-	onDeferWithErr := recordCallStats(ctx, "go.sql.query", c.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func (c wConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (rows driver.Rows, err error) {
+	queryerCtx, ok := c.parent.(driver.QueryerContext)
 
-	if queryerCtx, ok := c.parent.(driver.QueryerContext); ok {
-		parentSpan := trace.FromContext(ctx)
-		if !c.options.AllowRoot && parentSpan == nil {
-			return queryerCtx.QueryContext(ctx, query, args)
-		}
+	if !ok {
+		return nil, driver.ErrSkip
+	}
 
-		var span *trace.Span
-		if parentSpan == nil {
-			ctx, span = trace.StartSpan(ctx, "sql:query",
-				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithSampler(c.options.Sampler),
-			)
-		} else {
-			_, span = trace.StartSpan(ctx, "sql:query",
-				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithSampler(c.options.Sampler),
-			)
-		}
-		attrs := append([]trace.Attribute(nil), c.options.DefaultAttributes...)
-		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
-			if c.options.QueryParams {
-				attrs = append(attrs, namedParamsAttr(args)...)
+	if c.options.Intercept != nil {
+		ctx, query, args = c.options.Intercept(ctx, Query, query, args)
+	}
+
+	if c.options.operations[Query] {
+		newCtx, finalizers := apply(ctx, c.options.Middlewares, Query, query, args)
+		ctx = newCtx
+
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
 			}
-		}
-		span.AddAttributes(attrs...)
-
-		defer func() {
-			setSpanStatus(span, c.options, err)
-			span.End()
 		}()
-
-		rows, err = queryerCtx.QueryContext(ctx, query, args)
-		if err != nil {
-			return nil, err
-		}
-
-		return wrapRows(ctx, rows, c.options), nil
 	}
 
-	return nil, driver.ErrSkip
+	rows, err = queryerCtx.QueryContext(ctx, query, args)
+	if err != nil {
+		return nil, err
+	}
+
+	return wrapRows(ctx, rows, c.options), nil
 }
 
-func (c ocConn) Prepare(query string) (stmt driver.Stmt, err error) {
-	onDeferWithErr := recordCallStats(context.Background(), "go.sql.prepare", c.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func (c wConn) Prepare(query string) (stmt driver.Stmt, err error) {
+	ctx := context.Background()
 
-	if c.options.AllowRoot {
-		_, span := trace.StartSpan(context.Background(), "sql:prepare",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
-		)
-		attrs := make([]trace.Attribute, 0, len(c.options.DefaultAttributes)+1)
-		attrs = append(attrs, c.options.DefaultAttributes...)
-		attrs = append(attrs, attrMissingContext)
-		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
-		}
-		span.AddAttributes(attrs...)
+	if c.options.Intercept != nil {
+		ctx, query, _ = c.options.Intercept(ctx, Prepare, query, nil)
+	}
+
+	if c.options.operations[Prepare] {
+		newCtx, finalizers := apply(ctx, c.options.Middlewares, Prepare, query, nil)
+		ctx = newCtx
 
 		defer func() {
-			setSpanStatus(span, c.options, err)
-			span.End()
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
 		}()
 	}
 
@@ -411,404 +391,276 @@ func (c ocConn) Prepare(query string) (stmt driver.Stmt, err error) {
 		return nil, err
 	}
 
-	stmt = wrapStmt(stmt, query, c.options)
-	return
+	return wrapStmt(ctx, stmt, query, c.options), nil
 }
 
-func (c *ocConn) Close() error {
+func (c *wConn) Close() error {
 	return c.parent.Close()
 }
 
-func (c *ocConn) Begin() (driver.Tx, error) {
-	return c.BeginTx(context.TODO(), driver.TxOptions{})
+func (c *wConn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
 }
 
-func (c *ocConn) PrepareContext(ctx context.Context, query string) (stmt driver.Stmt, err error) {
-	onDeferWithErr := recordCallStats(ctx, "go.sql.prepare", c.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func (c *wConn) PrepareContext(ctx context.Context, query string) (stmt driver.Stmt, err error) {
+	if c.options.Intercept != nil {
+		ctx, query, _ = c.options.Intercept(ctx, Prepare, query, nil)
+	}
 
-	var span *trace.Span
-	attrs := append([]trace.Attribute(nil), c.options.DefaultAttributes...)
-	if c.options.AllowRoot || trace.FromContext(ctx) != nil {
-		ctx, span = trace.StartSpan(ctx, "sql:prepare",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
-		)
-		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
-		}
+	if c.options.operations[Prepare] {
+		newCtx, finalizers := apply(ctx, c.options.Middlewares, Prepare, query, nil)
+		ctx = newCtx
+
 		defer func() {
-			setSpanStatus(span, c.options, err)
-			span.End()
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
 		}()
 	}
 
 	if prepCtx, ok := c.parent.(driver.ConnPrepareContext); ok {
 		stmt, err = prepCtx.PrepareContext(ctx, query)
-	} else {
-		if span != nil {
-			attrs = append(attrs, attrMissingContext)
-		}
-		stmt, err = c.parent.Prepare(query)
-	}
-	span.AddAttributes(attrs...)
-	if err != nil {
-		return nil, err
 	}
 
-	stmt = wrapStmt(stmt, query, c.options)
-	return
+	return wrapStmt(ctx, stmt, query, c.options), nil
 }
 
-func (c *ocConn) BeginTx(ctx context.Context, opts driver.TxOptions) (tx driver.Tx, err error) {
-	onDeferWithErr := recordCallStats(ctx, "go.sql.begin", c.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func (c *wConn) BeginTx(ctx context.Context, opts driver.TxOptions) (tx driver.Tx, err error) {
+	if c.options.operations[Begin] {
+		newCtx, finalizers := apply(ctx, c.options.Middlewares, Begin, "", nil)
+		ctx = newCtx
 
-	if !c.options.AllowRoot && trace.FromContext(ctx) == nil {
-		if connBeginTx, ok := c.parent.(driver.ConnBeginTx); ok {
-			return connBeginTx.BeginTx(ctx, opts)
-		}
-		return c.parent.Begin()
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
+		}()
 	}
-
-	var span *trace.Span
-	attrs := append([]trace.Attribute(nil), c.options.DefaultAttributes...)
-
-	if ctx == nil || ctx == context.TODO() {
-		ctx = context.Background()
-		_, span = trace.StartSpan(ctx, "sql:begin_transaction",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
-		)
-		attrs = append(attrs, attrMissingContext)
-	} else {
-		_, span = trace.StartSpan(ctx, "sql:begin_transaction",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
-		)
-	}
-	defer func() {
-		if len(attrs) > 0 {
-			span.AddAttributes(attrs...)
-		}
-		span.End()
-	}()
 
 	if connBeginTx, ok := c.parent.(driver.ConnBeginTx); ok {
 		tx, err = connBeginTx.BeginTx(ctx, opts)
-		setSpanStatus(span, c.options, err)
 		if err != nil {
 			return nil, err
 		}
-		return ocTx{parent: tx, ctx: ctx, options: c.options}, nil
+
+		return wTx{parent: tx, ctx: ctx, options: c.options}, nil
 	}
 
-	attrs = append(
-		attrs,
-		attrDeprecated,
-		trace.StringAttribute(
-			"ocsql.deprecated", "driver does not support ConnBeginTx",
-		),
-	)
-	tx, err = c.parent.Begin()
-	setSpanStatus(span, c.options, err)
+	tx, err = c.parent.Begin() // nolint:staticcheck // Deprecated usage for backwards compatibility.
 	if err != nil {
 		return nil, err
 	}
-	return ocTx{parent: tx, ctx: ctx, options: c.options}, nil
+
+	return wTx{parent: tx, ctx: ctx, options: c.options}, nil
 }
 
-func (c *ocConn) CheckNamedValue(nv *driver.NamedValue) (err error) {
+func (c *wConn) CheckNamedValue(nv *driver.NamedValue) (err error) {
 	nvc, ok := c.parent.(driver.NamedValueChecker)
 	if ok {
 		return nvc.CheckNamedValue(nv)
 	}
+
 	nv.Value, err = driver.DefaultParameterConverter.ConvertValue(nv.Value)
+
 	return err
 }
 
-// ocResult implements driver.Result
-type ocResult struct {
+// wResult implements driver.Result.
+type wResult struct {
 	parent  driver.Result
 	ctx     context.Context
-	options TraceOptions
+	options Options
 }
 
-func (r ocResult) LastInsertId() (id int64, err error) {
-	if r.options.LastInsertID {
-		_, span := trace.StartSpan(r.ctx, "sql:last_insert_id",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(r.options.Sampler),
-		)
-		if len(r.options.DefaultAttributes) > 0 {
-			span.AddAttributes(r.options.DefaultAttributes...)
-		}
+func (r wResult) LastInsertId() (id int64, err error) {
+	if r.options.operations[LastInsertID] {
+		_, finalizers := apply(r.ctx, r.options.Middlewares, LastInsertID, "", nil)
+
 		defer func() {
-			setSpanStatus(span, r.options, err)
-			span.End()
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
 		}()
 	}
 
 	id, err = r.parent.LastInsertId()
+
 	return
 }
 
-func (r ocResult) RowsAffected() (cnt int64, err error) {
-	if r.options.RowsAffected {
-		_, span := trace.StartSpan(r.ctx, "sql:rows_affected",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(r.options.Sampler),
-		)
-		if len(r.options.DefaultAttributes) > 0 {
-			span.AddAttributes(r.options.DefaultAttributes...)
-		}
+func (r wResult) RowsAffected() (cnt int64, err error) {
+	if r.options.operations[RowsAffected] {
+		_, finalizers := apply(r.ctx, r.options.Middlewares, RowsAffected, "", nil)
+
 		defer func() {
-			setSpanStatus(span, r.options, err)
-			span.End()
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
 		}()
 	}
 
-	cnt, err = r.parent.RowsAffected()
-	return
+	return r.parent.RowsAffected()
 }
 
-// ocStmt implements driver.Stmt
-type ocStmt struct {
+// wStmt implements driver.Stmt.
+type wStmt struct {
+	ctx     context.Context
 	parent  driver.Stmt
 	query   string
-	options TraceOptions
+	options Options
 }
 
-func (s ocStmt) Exec(args []driver.Value) (res driver.Result, err error) {
-	onDeferWithErr := recordCallStats(context.Background(), "go.sql.stmt.exec", s.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
-
-	if !s.options.AllowRoot {
-		return s.parent.Exec(args)
+func (s wStmt) Exec(args []driver.Value) (res driver.Result, err error) {
+	if s.options.Intercept != nil {
+		ctx, _, nargs := s.options.Intercept(s.ctx, StmtExec, s.query, namedValues(args))
+		s.ctx = ctx
+		args = values(nargs)
 	}
 
-	ctx, span := trace.StartSpan(context.Background(), "sql:exec",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithSampler(s.options.Sampler),
-	)
-	attrs := make([]trace.Attribute, 0, len(s.options.DefaultAttributes)+2)
-	attrs = append(attrs, s.options.DefaultAttributes...)
-	attrs = append(
-		attrs,
-		attrDeprecated,
-		trace.StringAttribute(
-			"ocsql.deprecated", "driver does not support StmtExecContext",
-		),
-	)
-	if s.options.Query {
-		attrs = append(attrs, trace.StringAttribute("sql.query", s.query))
-		if s.options.QueryParams {
-			attrs = append(attrs, paramsAttr(args)...)
-		}
+	if s.options.operations[StmtExec] {
+		newCtx, finalizers := apply(s.ctx, s.options.Middlewares, StmtExec, s.query, namedValues(args))
+		s.ctx = newCtx
+
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
+		}()
 	}
-	span.AddAttributes(attrs...)
 
-	defer func() {
-		setSpanStatus(span, s.options, err)
-		span.End()
-	}()
-
-	res, err = s.parent.Exec(args)
+	res, err = s.parent.Exec(args) // nolint:staticcheck // Deprecated usage for backwards compatibility.
 	if err != nil {
 		return nil, err
 	}
 
-	res, err = ocResult{parent: res, ctx: ctx, options: s.options}, nil
-	return
+	return wResult{parent: res, ctx: s.ctx, options: s.options}, nil
 }
 
-func (s ocStmt) Close() error {
+func (s wStmt) Close() (err error) {
+	if s.options.operations[StmtClose] {
+		_, finalizers := apply(s.ctx, s.options.Middlewares, StmtClose, s.query, nil)
+
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
+		}()
+	}
+
 	return s.parent.Close()
 }
 
-func (s ocStmt) NumInput() int {
+func (s wStmt) NumInput() int {
 	return s.parent.NumInput()
 }
 
-func (s ocStmt) Query(args []driver.Value) (rows driver.Rows, err error) {
-	onDeferWithErr := recordCallStats(context.Background(), "go.sql.stmt.query", s.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
-
-	if !s.options.AllowRoot {
-		return s.parent.Query(args)
+func (s wStmt) Query(args []driver.Value) (rows driver.Rows, err error) {
+	if s.options.Intercept != nil {
+		ctx, _, nargs := s.options.Intercept(s.ctx, StmtQuery, s.query, namedValues(args))
+		s.ctx = ctx
+		args = values(nargs)
 	}
 
-	ctx, span := trace.StartSpan(context.Background(), "sql:query",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithSampler(s.options.Sampler),
-	)
-	attrs := make([]trace.Attribute, 0, len(s.options.DefaultAttributes)+2)
-	attrs = append(attrs, s.options.DefaultAttributes...)
-	attrs = append(
-		attrs,
-		attrDeprecated,
-		trace.StringAttribute(
-			"ocsql.deprecated", "driver does not support StmtQueryContext",
-		),
-	)
-	if s.options.Query {
-		attrs = append(attrs, trace.StringAttribute("sql.query", s.query))
-		if s.options.QueryParams {
-			attrs = append(attrs, paramsAttr(args)...)
-		}
+	if s.options.operations[StmtQuery] {
+		newCtx, finalizers := apply(s.ctx, s.options.Middlewares, StmtQuery, s.query, namedValues(args))
+		s.ctx = newCtx
+
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
+		}()
 	}
-	span.AddAttributes(attrs...)
 
-	defer func() {
-		setSpanStatus(span, s.options, err)
-		span.End()
-	}()
-
-	rows, err = s.parent.Query(args)
+	rows, err = s.parent.Query(args) // nolint:staticcheck // Deprecated usage for backwards compatibility.
 	if err != nil {
 		return nil, err
 	}
-	rows, err = wrapRows(ctx, rows, s.options), nil
-	return
+
+	return wrapRows(s.ctx, rows, s.options), nil
 }
 
-func (s ocStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (res driver.Result, err error) {
-	onDeferWithErr := recordCallStats(ctx, "go.sql.stmt.exec", s.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
-
-	parentSpan := trace.FromContext(ctx)
-	if !s.options.AllowRoot && parentSpan == nil {
-		// we already tested driver to implement StmtExecContext
-		return s.parent.(driver.StmtExecContext).ExecContext(ctx, args)
+func (s wStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (res driver.Result, err error) {
+	if s.options.Intercept != nil {
+		ctx, _, args = s.options.Intercept(s.ctx, StmtExec, s.query, args)
 	}
 
-	var span *trace.Span
-	if parentSpan == nil {
-		ctx, span = trace.StartSpan(ctx, "sql:exec",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(s.options.Sampler),
-		)
-	} else {
-		_, span = trace.StartSpan(ctx, "sql:exec",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(s.options.Sampler),
-		)
-	}
-	attrs := append([]trace.Attribute(nil), s.options.DefaultAttributes...)
-	if s.options.Query {
-		attrs = append(attrs, trace.StringAttribute("sql.query", s.query))
-		if s.options.QueryParams {
-			attrs = append(attrs, namedParamsAttr(args)...)
-		}
-	}
-	span.AddAttributes(attrs...)
+	if s.options.operations[StmtExec] {
+		newCtx, finalizers := apply(ctx, s.options.Middlewares, StmtExec, s.query, args)
+		ctx = newCtx
 
-	defer func() {
-		setSpanStatus(span, s.options, err)
-		span.End()
-	}()
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
+		}()
+	}
 
-	// we already tested driver to implement StmtExecContext
-	execContext := s.parent.(driver.StmtExecContext)
+	execContext, ok := s.parent.(driver.StmtExecContext)
+	if !ok {
+		return nil, errors.New("driver does not implement ExecContext")
+	}
+
 	res, err = execContext.ExecContext(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	res, err = ocResult{parent: res, ctx: ctx, options: s.options}, nil
-	return
+
+	return wResult{parent: res, ctx: ctx, options: s.options}, nil
 }
 
-func (s ocStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (rows driver.Rows, err error) {
-	onDeferWithErr := recordCallStats(ctx, "go.sql.stmt.query", s.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
-
-	parentSpan := trace.FromContext(ctx)
-	if !s.options.AllowRoot && parentSpan == nil {
-		// we already tested driver to implement StmtQueryContext
-		return s.parent.(driver.StmtQueryContext).QueryContext(ctx, args)
+func (s wStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (rows driver.Rows, err error) {
+	if s.options.Intercept != nil {
+		ctx, _, args = s.options.Intercept(ctx, StmtQuery, s.query, args)
 	}
 
-	var span *trace.Span
-	if parentSpan == nil {
-		ctx, span = trace.StartSpan(ctx, "sql:query",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(s.options.Sampler),
-		)
-	} else {
-		_, span = trace.StartSpan(ctx, "sql:query",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(s.options.Sampler),
-		)
+	if s.options.operations[StmtQuery] {
+		newCtx, finalizers := apply(ctx, s.options.Middlewares, StmtQuery, s.query, args)
+		ctx = newCtx
+
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
+		}()
 	}
-	attrs := append([]trace.Attribute(nil), s.options.DefaultAttributes...)
-	if s.options.Query {
-		attrs = append(attrs, trace.StringAttribute("sql.query", s.query))
-		if s.options.QueryParams {
-			attrs = append(attrs, namedParamsAttr(args)...)
+
+	queryContext, ok := s.parent.(driver.StmtQueryContext)
+	if !ok {
+		if !ok {
+			return nil, errors.New("driver does not implement QueryContext")
 		}
 	}
-	span.AddAttributes(attrs...)
 
-	defer func() {
-		setSpanStatus(span, s.options, err)
-		span.End()
-	}()
-
-	// we already tested driver to implement StmtQueryContext
-	queryContext := s.parent.(driver.StmtQueryContext)
 	rows, err = queryContext.QueryContext(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	rows, err = wrapRows(ctx, rows, s.options), nil
-	return
+
+	return wrapRows(ctx, rows, s.options), nil
 }
 
 // withRowsColumnTypeScanType is the same as the driver.RowsColumnTypeScanType
 // interface except it omits the driver.Rows embedded interface.
-// If the original driver.Rows implementation wrapped by ocsql supports
+// If the original driver.Rows wrapped implementation supports
 // RowsColumnTypeScanType we enable the original method implementation in the
-// returned driver.Rows from wrapRows by doing a composition with ocRows.
+// returned driver.Rows from wrapRows by doing a composition with wRows.
 type withRowsColumnTypeScanType interface {
 	ColumnTypeScanType(index int) reflect.Type
 }
 
-// ocRows implements driver.Rows and all enhancement interfaces except
+// wRows implements driver.Rows and all enhancement interfaces except
 // driver.RowsColumnTypeScanType.
-type ocRows struct {
-	parent  driver.Rows
+type wRows struct {
 	ctx     context.Context
-	options TraceOptions
+	parent  driver.Rows
+	options Options
 }
 
-// HasNextResultSet calls the implements the driver.RowsNextResultSet for ocRows.
-// It returns the the underlying result of HasNextResultSet from the ocRows.parent
+// HasNextResultSet calls the implements the driver.RowsNextResultSet for wRows.
+// It returns the the underlying result of HasNextResultSet from the wRows.parent
 // if the parent implements driver.RowsNextResultSet.
-func (r ocRows) HasNextResultSet() bool {
+func (r wRows) HasNextResultSet() bool {
 	if v, ok := r.parent.(driver.RowsNextResultSet); ok {
 		return v.HasNextResultSet()
 	}
@@ -816,10 +668,10 @@ func (r ocRows) HasNextResultSet() bool {
 	return false
 }
 
-// NextResultsSet calls the implements the driver.RowsNextResultSet for ocRows.
-// It returns the the underlying result of NextResultSet from the ocRows.parent
+// NextResultsSet calls the implements the driver.RowsNextResultSet for wRows.
+// It returns the the underlying result of NextResultSet from the wRows.parent
 // if the parent implements driver.RowsNextResultSet.
-func (r ocRows) NextResultSet() error {
+func (r wRows) NextResultSet() error {
 	if v, ok := r.parent.(driver.RowsNextResultSet); ok {
 		return v.NextResultSet()
 	}
@@ -827,10 +679,10 @@ func (r ocRows) NextResultSet() error {
 	return io.EOF
 }
 
-// ColumnTypeDatabaseTypeName calls the implements the driver.RowsColumnTypeDatabaseTypeName for ocRows.
-// It returns the the underlying result of ColumnTypeDatabaseTypeName from the ocRows.parent
+// ColumnTypeDatabaseTypeName calls the implements the driver.RowsColumnTypeDatabaseTypeName for wRows.
+// It returns the the underlying result of ColumnTypeDatabaseTypeName from the wRows.parent
 // if the parent implements driver.RowsColumnTypeDatabaseTypeName.
-func (r ocRows) ColumnTypeDatabaseTypeName(index int) string {
+func (r wRows) ColumnTypeDatabaseTypeName(index int) string {
 	if v, ok := r.parent.(driver.RowsColumnTypeDatabaseTypeName); ok {
 		return v.ColumnTypeDatabaseTypeName(index)
 	}
@@ -838,10 +690,10 @@ func (r ocRows) ColumnTypeDatabaseTypeName(index int) string {
 	return ""
 }
 
-// ColumnTypeLength calls the implements the driver.RowsColumnTypeLength for ocRows.
-// It returns the the underlying result of ColumnTypeLength from the ocRows.parent
+// ColumnTypeLength calls the implements the driver.RowsColumnTypeLength for wRows.
+// It returns the the underlying result of ColumnTypeLength from the wRows.parent
 // if the parent implements driver.RowsColumnTypeLength.
-func (r ocRows) ColumnTypeLength(index int) (length int64, ok bool) {
+func (r wRows) ColumnTypeLength(index int) (length int64, ok bool) {
 	if v, ok := r.parent.(driver.RowsColumnTypeLength); ok {
 		return v.ColumnTypeLength(index)
 	}
@@ -849,10 +701,10 @@ func (r ocRows) ColumnTypeLength(index int) (length int64, ok bool) {
 	return 0, false
 }
 
-// ColumnTypeNullable calls the implements the driver.RowsColumnTypeNullable for ocRows.
-// It returns the the underlying result of ColumnTypeNullable from the ocRows.parent
+// ColumnTypeNullable calls the implements the driver.RowsColumnTypeNullable for wRows.
+// It returns the the underlying result of ColumnTypeNullable from the wRows.parent
 // if the parent implements driver.RowsColumnTypeNullable.
-func (r ocRows) ColumnTypeNullable(index int) (nullable, ok bool) {
+func (r wRows) ColumnTypeNullable(index int) (nullable, ok bool) {
 	if v, ok := r.parent.(driver.RowsColumnTypeNullable); ok {
 		return v.ColumnTypeNullable(index)
 	}
@@ -860,10 +712,10 @@ func (r ocRows) ColumnTypeNullable(index int) (nullable, ok bool) {
 	return false, false
 }
 
-// ColumnTypePrecisionScale calls the implements the driver.RowsColumnTypePrecisionScale for ocRows.
-// It returns the the underlying result of ColumnTypePrecisionScale from the ocRows.parent
+// ColumnTypePrecisionScale calls the implements the driver.RowsColumnTypePrecisionScale for wRows.
+// It returns the the underlying result of ColumnTypePrecisionScale from the wRows.parent
 // if the parent implements driver.RowsColumnTypePrecisionScale.
-func (r ocRows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok bool) {
+func (r wRows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok bool) {
 	if v, ok := r.parent.(driver.RowsColumnTypePrecisionScale); ok {
 		return v.ColumnTypePrecisionScale(index)
 	}
@@ -871,65 +723,48 @@ func (r ocRows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok 
 	return 0, 0, false
 }
 
-func (r ocRows) Columns() []string {
+func (r wRows) Columns() []string {
 	return r.parent.Columns()
 }
 
-func (r ocRows) Close() (err error) {
-	if r.options.RowsClose {
-		_, span := trace.StartSpan(r.ctx, "sql:rows_close",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(r.options.Sampler),
-		)
-		if len(r.options.DefaultAttributes) > 0 {
-			span.AddAttributes(r.options.DefaultAttributes...)
-		}
+func (r wRows) Close() (err error) {
+	if r.options.operations[RowsClose] {
+		_, finalizers := apply(r.ctx, r.options.Middlewares, RowsClose, "", nil)
+
 		defer func() {
-			setSpanStatus(span, r.options, err)
-			span.End()
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
 		}()
 	}
 
-	err = r.parent.Close()
-	return
+	return r.parent.Close()
 }
 
-func (r ocRows) Next(dest []driver.Value) (err error) {
-	if r.options.RowsNext {
-		_, span := trace.StartSpan(r.ctx, "sql:rows_next",
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(r.options.Sampler),
-		)
-		if len(r.options.DefaultAttributes) > 0 {
-			span.AddAttributes(r.options.DefaultAttributes...)
-		}
+func (r wRows) Next(dest []driver.Value) (err error) {
+	if r.options.operations[RowsNext] {
+		_, finalizers := apply(r.ctx, r.options.Middlewares, RowsNext, "", nil)
+
 		defer func() {
-			if err == io.EOF {
-				// not an error; expected to happen during iteration
-				setSpanStatus(span, r.options, nil)
-			} else {
-				setSpanStatus(span, r.options, err)
+			for _, onFinish := range finalizers {
+				onFinish(err)
 			}
-			span.End()
 		}()
 	}
 
-	err = r.parent.Next(dest)
-	return
+	return r.parent.Next(dest)
 }
 
 // wrapRows returns a struct which conforms to the driver.Rows interface.
-// ocRows implements all enhancement interfaces that have no effect on
+// wRows implements all enhancement interfaces that have no effect on
 // sql/database logic in case the underlying parent implementation lacks them.
 // Currently the one exception is RowsColumnTypeScanType which does not have a
 // valid zero value. This interface is tested for and only enabled in case the
 // parent implementation supports it.
-func wrapRows(ctx context.Context, parent driver.Rows, options TraceOptions) driver.Rows {
-	var (
-		ts, hasColumnTypeScan = parent.(driver.RowsColumnTypeScanType)
-	)
+func wrapRows(ctx context.Context, parent driver.Rows, options Options) driver.Rows {
+	ts, hasColumnTypeScan := parent.(driver.RowsColumnTypeScanType)
 
-	r := ocRows{
+	r := wRows{
 		parent:  parent,
 		ctx:     ctx,
 		options: options,
@@ -937,7 +772,7 @@ func wrapRows(ctx context.Context, parent driver.Rows, options TraceOptions) dri
 
 	if hasColumnTypeScan {
 		return struct {
-			ocRows
+			wRows
 			withRowsColumnTypeScanType
 		}{r, ts}
 	}
@@ -945,133 +780,37 @@ func wrapRows(ctx context.Context, parent driver.Rows, options TraceOptions) dri
 	return r
 }
 
-// ocTx implements driver.Tx
-type ocTx struct {
+// wTx implements driver.Tx.
+type wTx struct {
 	parent  driver.Tx
 	ctx     context.Context
-	options TraceOptions
+	options Options
 }
 
-func (t ocTx) Commit() (err error) {
-	onDeferWithErr := recordCallStats(context.Background(), "go.sql.commit", t.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func (t wTx) Commit() (err error) {
+	if t.options.operations[Commit] {
+		_, finalizers := apply(t.ctx, t.options.Middlewares, Commit, "", nil)
 
-	_, span := trace.StartSpan(t.ctx, "sql:commit",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithSampler(t.options.Sampler),
-	)
-	if len(t.options.DefaultAttributes) > 0 {
-		span.AddAttributes(t.options.DefaultAttributes...)
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
+		}()
 	}
-	defer func() {
-		setSpanStatus(span, t.options, err)
-		span.End()
-	}()
 
-	err = t.parent.Commit()
-	return
+	return t.parent.Commit()
 }
 
-func (t ocTx) Rollback() (err error) {
-	onDeferWithErr := recordCallStats(context.Background(), "go.sql.rollback", t.options.InstanceName)
-	defer func() {
-		// Invoking this function in a defer so that we can capture
-		// the value of err as set on function exit.
-		onDeferWithErr(err)
-	}()
+func (t wTx) Rollback() (err error) {
+	if t.options.operations[Rollback] {
+		_, finalizers := apply(t.ctx, t.options.Middlewares, Rollback, "", nil)
 
-	_, span := trace.StartSpan(t.ctx, "sql:rollback",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithSampler(t.options.Sampler),
-	)
-	if len(t.options.DefaultAttributes) > 0 {
-		span.AddAttributes(t.options.DefaultAttributes...)
+		defer func() {
+			for _, onFinish := range finalizers {
+				onFinish(err)
+			}
+		}()
 	}
-	defer func() {
-		setSpanStatus(span, t.options, err)
-		span.End()
-	}()
 
-	err = t.parent.Rollback()
-	return
-}
-
-func paramsAttr(args []driver.Value) []trace.Attribute {
-	attrs := make([]trace.Attribute, 0, len(args))
-	for i, arg := range args {
-		key := "sql.arg" + strconv.Itoa(i)
-		attrs = append(attrs, argToAttr(key, arg))
-	}
-	return attrs
-}
-
-func namedParamsAttr(args []driver.NamedValue) []trace.Attribute {
-	attrs := make([]trace.Attribute, 0, len(args))
-	for _, arg := range args {
-		var key string
-		if arg.Name != "" {
-			key = arg.Name
-		} else {
-			key = "sql.arg." + strconv.Itoa(arg.Ordinal)
-		}
-		attrs = append(attrs, argToAttr(key, arg.Value))
-	}
-	return attrs
-}
-
-func argToAttr(key string, val interface{}) trace.Attribute {
-	switch v := val.(type) {
-	case nil:
-		return trace.StringAttribute(key, "")
-	case int64:
-		return trace.Int64Attribute(key, v)
-	case float64:
-		return trace.StringAttribute(key, fmt.Sprintf("%f", v))
-	case bool:
-		return trace.BoolAttribute(key, v)
-	case []byte:
-		if len(v) > 256 {
-			v = v[0:256]
-		}
-		return trace.StringAttribute(key, fmt.Sprintf("%s", v))
-	default:
-		s := fmt.Sprintf("%v", v)
-		if len(s) > 256 {
-			s = s[0:256]
-		}
-		return trace.StringAttribute(key, s)
-	}
-}
-
-func setSpanStatus(span *trace.Span, opts TraceOptions, err error) {
-	var status trace.Status
-	switch err {
-	case nil:
-		status.Code = trace.StatusCodeOK
-		span.SetStatus(status)
-		return
-	case driver.ErrSkip:
-		status.Code = trace.StatusCodeUnimplemented
-		if opts.DisableErrSkip {
-			// Suppress driver.ErrSkip since at runtime some drivers might not have
-			// certain features, and an error would pollute many spans.
-			status.Code = trace.StatusCodeOK
-		}
-	case context.Canceled:
-		status.Code = trace.StatusCodeCancelled
-	case context.DeadlineExceeded:
-		status.Code = trace.StatusCodeDeadlineExceeded
-	case sql.ErrNoRows:
-		status.Code = trace.StatusCodeNotFound
-	case sql.ErrTxDone, errConnDone:
-		status.Code = trace.StatusCodeFailedPrecondition
-	default:
-		status.Code = trace.StatusCodeUnknown
-	}
-	status.Message = err.Error()
-	span.SetStatus(status)
+	return t.parent.Rollback()
 }
