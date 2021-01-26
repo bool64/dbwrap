@@ -24,8 +24,12 @@ func TestRegister(t *testing.T) {
 	var l []string
 
 	driverName, err := dbwrap.Register("sqlmock",
+		dbwrap.WithOptions(dbwrap.Options{}),
+		dbwrap.WithAllOperations(),
+
 		dbwrap.WithMiddleware(
 			func(ctx context.Context, operation dbwrap.Operation, statement string, args []driver.NamedValue) (nCtx context.Context, onFinish func(error)) {
+				assert.Equal(t, "bool64/dbwrap_test.TestRegister", dbwrap.Caller())
 				l = append(l, "mw1 triggered: "+string(operation)+": "+statement)
 
 				return ctx, func(err error) {
@@ -48,6 +52,7 @@ func TestRegister(t *testing.T) {
 				}
 			},
 		),
+
 		dbwrap.WithInterceptor(func(ctx context.Context, operation dbwrap.Operation, statement string, args []driver.NamedValue) (context.Context, string, []driver.NamedValue) {
 			l = append(l, "intercepted: "+string(operation)+": "+statement)
 
@@ -171,6 +176,18 @@ mw1 triggered: query: SELECT a FROM b WHERE c = ? #intercepted
 mw2 triggered: query: SELECT a FROM b WHERE c = ? #intercepted
 mw2 done
 mw1 done
+mw1 triggered: rows_next: 
+mw2 triggered: rows_next: 
+mw2 done
+mw1 done
+mw1 triggered: rows_next: 
+mw2 triggered: rows_next: 
+mw2 done
+mw1 done
+mw1 triggered: rows_next: 
+mw2 triggered: rows_next: 
+mw2 failed: EOF
+mw1 failed: EOF
 mw1 triggered: rows_close: 
 mw2 triggered: rows_close: 
 mw2 done
