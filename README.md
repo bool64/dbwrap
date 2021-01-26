@@ -1,7 +1,6 @@
 # dbwrap
 
 [![Build Status](https://github.com/bool64/dbwrap/workflows/test-unit/badge.svg)](https://github.com/bool64/dbwrap/actions?query=branch%3Amaster+workflow%3Atest-unit)
-[![Coverage Status](https://codecov.io/gh/bool64/dbwrap/branch/master/graph/badge.svg)](https://codecov.io/gh/bool64/dbwrap)
 [![GoDevDoc](https://img.shields.io/badge/dev-doc-00ADD8?logo=go)](https://pkg.go.dev/github.com/bool64/dbwrap)
 [![Time Tracker](https://wakatime.com/badge/github/bool64/dbwrap.svg)](https://wakatime.com/badge/github/bool64/dbwrap)
 ![Code lines](https://sloc.xyz/github/bool64/dbwrap/?category=code)
