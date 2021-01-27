@@ -18,7 +18,7 @@ Add a wrapper with custom middlewares to your existing database code to instrume
 func dbWithQueriesLogging(dbConnector driver.Connector, logger *zap.Logger) driver.Connector {
 	return dbwrap.WrapConnector(dbConnector,
 		// This interceptor adds extra observability on DB side.
-		// The origin of query would be visible with `SHOW PROCESSLIST` in MySQL.
+		// The origin of query will be visible with `SHOW PROCESSLIST` in MySQL.
 		dbwrap.WithInterceptor(func(
 			ctx context.Context,
 			operation dbwrap.Operation,
