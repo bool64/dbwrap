@@ -551,6 +551,13 @@ func (s wStmt) Close() (err error) {
 }
 
 func (s wStmt) NumInput() int {
+	// NumInput may also return -1, if the driver doesn't know
+	// its number of placeholders. In that case, the sql package
+	// will not sanity check Exec or Query argument counts.
+	if s.parent == nil {
+		return -1
+	}
+
 	return s.parent.NumInput()
 }
 
