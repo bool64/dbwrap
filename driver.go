@@ -419,7 +419,9 @@ func (c *wConn) PrepareContext(ctx context.Context, query string) (stmt driver.S
 	}
 
 	if prepCtx, ok := c.parent.(driver.ConnPrepareContext); ok {
-		stmt, err = prepCtx.PrepareContext(ctx, query)
+		if stmt, err = prepCtx.PrepareContext(ctx, query); err != nil {
+			return nil, err
+		}
 	}
 
 	return wrapStmt(ctx, stmt, query, c.options), nil
