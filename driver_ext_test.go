@@ -133,6 +133,7 @@ func TestRegister(t *testing.T) {
 	rows, err = tx.QueryContext(ctx, "SELECT ?", 1)
 	assert.NoError(t, err)
 	assert.NoError(t, rows.Close())
+	assert.NoError(t, rows.Err())
 
 	mock.ExpectCommit()
 	assert.NoError(t, tx.Commit())

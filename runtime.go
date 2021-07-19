@@ -17,20 +17,28 @@ const (
 // For example the result could be
 //    pressly/goose.MySQLDialect.dbVersionQuery
 func Caller(skipPackages ...string) string {
+	p := ""
 	pc := make([]uintptr, stackSize)
 
-	n := runtime.Callers(skipCallers, pc)
-	p := ""
+	runtime.Callers(skipCallers, pc)
 
-	for i := 0; i < n; i++ {
-		f := runtime.FuncForPC(pc[i])
+	frames := runtime.CallersFrames(pc)
+
+	for {
+		frame, more := frames.Next()
+
+		if !more {
+			break
+		}
+
+		fn := frame.Function
 
 		// Skip unnamed literals.
-		if strings.Contains(f.Name(), "{") {
+		if fn == "" || strings.Contains(fn, "{") {
 			continue
 		}
 
-		parts := strings.Split(f.Name(), "/")
+		parts := strings.Split(fn, "/")
 		parts[len(parts)-1] = strings.Split(parts[len(parts)-1], ".")[0]
 		p = strings.Join(parts, "/")
 
@@ -52,7 +60,7 @@ func Caller(skipPackages ...string) string {
 			continue
 		}
 
-		p = path.Base(path.Dir(f.Name())) + "/" + path.Base(f.Name())
+		p = path.Base(path.Dir(fn)) + "/" + path.Base(fn)
 
 		break
 	}
