@@ -30,6 +30,7 @@ func TestRegister(t *testing.T) {
 		dbwrap.WithMiddleware(
 			func(ctx context.Context, operation dbwrap.Operation, statement string, args []driver.NamedValue) (nCtx context.Context, onFinish func(error)) {
 				assert.Equal(t, "bool64/dbwrap_test.TestRegister", dbwrap.Caller())
+
 				l = append(l, "mw1 triggered: "+string(operation)+": "+statement)
 
 				return ctx, func(err error) {

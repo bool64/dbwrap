@@ -1,6 +1,7 @@
 package dbwrap
 
 import (
+	"context"
 	"path"
 	"runtime"
 	"strings"
@@ -11,11 +12,28 @@ const (
 	stackSize   = 30
 )
 
+type callerCtxKey struct{}
+
+// WithCaller overrides context with pre-defined caller value.
+func WithCaller(ctx context.Context, caller string) context.Context {
+	return context.WithValue(ctx, callerCtxKey{}, caller)
+}
+
+// CallerCtx checks context for a pre-defined caller value or returns caller from runtime stack.
+func CallerCtx(ctx context.Context, skipPackages ...string) string {
+	if caller, ok := ctx.Value(callerCtxKey{}).(string); ok {
+		return caller
+	}
+
+	return Caller(skipPackages...)
+}
+
 // Caller returns name and package of closest parent function
 // that does not belong to skipped packages.
 //
 // For example the result could be
-//    pressly/goose.MySQLDialect.dbVersionQuery
+//
+//	pressly/goose.MySQLDialect.dbVersionQuery
 func Caller(skipPackages ...string) string {
 	p := ""
 	pc := make([]uintptr, stackSize)

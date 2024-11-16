@@ -23,7 +23,7 @@ func ExampleWrapConnector() {
 		dbwrap.WithInterceptor(func(ctx context.Context, operation dbwrap.Operation, statement string, args []driver.NamedValue) (context.Context, string, []driver.NamedValue) {
 			// Closest caller in the stack with package not equal to listed and to "database/sql".
 			// Put your database helper packages here, so that caller bubbles up to app level.
-			caller := dbwrap.Caller(
+			caller := dbwrap.CallerCtx(ctx,
 				"github.com/Masterminds/squirrel",
 				"github.com/jmoiron/sqlx",
 			)
@@ -46,7 +46,7 @@ func ExampleWrapConnector() {
 				args []driver.NamedValue,
 			) (nCtx context.Context, onFinish func(error)) {
 				// Closest caller in the stack with package not equal to listed and to "database/sql".
-				caller := dbwrap.Caller(
+				caller := dbwrap.CallerCtx(ctx,
 					"github.com/Masterminds/squirrel",
 					"github.com/jmoiron/sqlx",
 				)

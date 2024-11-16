@@ -1,3 +1,4 @@
+//go:build go1.10
 // +build go1.10
 
 package dbwrap
@@ -74,12 +75,12 @@ func wrapConn(parent driver.Conn, options Options) driver.Conn {
 	panic("unreachable")
 }
 
-// nolint:funlen,gocyclo // Large switch is necessary to combine a variety of traits.
+//nolint:funlen,gocyclo // Large switch is necessary to combine a variety of traits.
 func wrapStmt(ctx context.Context, stmt driver.Stmt, query string, options Options) driver.Stmt {
 	var (
 		_, hasExeCtx    = stmt.(driver.StmtExecContext)
 		_, hasQryCtx    = stmt.(driver.StmtQueryContext)
-		c, hasColConv   = stmt.(driver.ColumnConverter) // nolint:staticcheck // Deprecated usage for backwards compatibility.
+		c, hasColConv   = stmt.(driver.ColumnConverter) //nolint:staticcheck // Deprecated usage for backwards compatibility.
 		n, hasNamValChk = stmt.(driver.NamedValueChecker)
 	)
 
