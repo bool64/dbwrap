@@ -64,7 +64,8 @@ func WithInterceptor(i func(
 	operation Operation,
 	statement string,
 	args []driver.NamedValue,
-) (context.Context, string, []driver.NamedValue)) Option {
+) (context.Context, string, []driver.NamedValue),
+) Option {
 	return func(o *Options) {
 		o.Intercept = i
 	}

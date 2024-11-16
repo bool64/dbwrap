@@ -99,11 +99,13 @@ func TestWrappingFallback(t *testing.T) {
 		oRows      = struct{ driver.Rows }{&stubRows{}}
 		options, _ = prepareOptions([]Option{
 			WithInterceptor(func(ctx context.Context, operation Operation, statement string,
-				args []driver.NamedValue) (context.Context, string, []driver.NamedValue) {
+				args []driver.NamedValue,
+			) (context.Context, string, []driver.NamedValue) {
 				return ctx, statement, args
 			}),
 			WithMiddleware(func(ctx context.Context, operation Operation, statement string,
-				args []driver.NamedValue) (nCtx context.Context, onFinish func(error)) {
+				args []driver.NamedValue,
+			) (nCtx context.Context, onFinish func(error)) {
 				return ctx, nil
 			}),
 		})

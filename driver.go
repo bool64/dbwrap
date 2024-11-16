@@ -49,9 +49,9 @@ var defaultOperations = map[Operation]bool{
 
 type conn interface {
 	driver.Pinger
-	driver.Execer // nolint:staticcheck // Deprecated usage for backwards compatibility.
+	driver.Execer //nolint:staticcheck // Deprecated usage for backwards compatibility.
 	driver.ExecerContext
-	driver.Queryer // nolint:staticcheck // Deprecated usage for backwards compatibility.
+	driver.Queryer //nolint:staticcheck // Deprecated usage for backwards compatibility.
 	driver.QueryerContext
 	driver.Conn
 	driver.ConnPrepareContext
@@ -241,7 +241,7 @@ func (c wConn) Ping(ctx context.Context) (err error) {
 func (c wConn) Exec(query string, args []driver.Value) (res driver.Result, err error) {
 	ctx := context.Background()
 
-	// nolint:staticcheck // Deprecated usage for backwards compatibility.
+	//nolint:staticcheck // Deprecated usage for backwards compatibility.
 	exec, ok := c.parent.(driver.Execer)
 
 	if !ok {
@@ -303,7 +303,7 @@ func (c wConn) ExecContext(ctx context.Context, query string, args []driver.Name
 }
 
 func (c wConn) Query(query string, args []driver.Value) (rows driver.Rows, err error) {
-	// nolint:staticcheck // Deprecated usage for backwards compatibility.
+	//nolint:staticcheck // Deprecated usage for backwards compatibility.
 	queryer, ok := c.parent.(driver.Queryer)
 
 	if !ok {
@@ -448,7 +448,7 @@ func (c *wConn) BeginTx(ctx context.Context, opts driver.TxOptions) (tx driver.T
 		return wTx{parent: tx, ctx: ctx, options: c.options}, nil
 	}
 
-	tx, err = c.parent.Begin() // nolint:staticcheck // Deprecated usage for backwards compatibility.
+	tx, err = c.parent.Begin() //nolint:staticcheck // Deprecated usage for backwards compatibility.
 	if err != nil {
 		return nil, err
 	}
@@ -530,7 +530,7 @@ func (s wStmt) Exec(args []driver.Value) (res driver.Result, err error) {
 		}()
 	}
 
-	res, err = s.parent.Exec(args) // nolint:staticcheck // Deprecated usage for backwards compatibility.
+	res, err = s.parent.Exec(args) //nolint:staticcheck // Deprecated usage for backwards compatibility.
 	if err != nil {
 		return nil, err
 	}
@@ -581,7 +581,7 @@ func (s wStmt) Query(args []driver.Value) (rows driver.Rows, err error) {
 		}()
 	}
 
-	rows, err = s.parent.Query(args) // nolint:staticcheck // Deprecated usage for backwards compatibility.
+	rows, err = s.parent.Query(args) //nolint:staticcheck // Deprecated usage for backwards compatibility.
 	if err != nil {
 		return nil, err
 	}
